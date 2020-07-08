@@ -1,0 +1,986 @@
+---
+title: "case 2"
+output: html_document
+---
+
+# Libs
+
+```{r}
+library(tidyverse)
+library(skimr)
+library(lubridate)
+library(tidytext)
+library(tidyquant)
+library(forecast)
+library(TSstudio)
+library(plotly)
+library(Quandl)
+library(tidymodels)
+library(modeltime)
+library(timetk)
+library(scales)
+
+```
+
+
+# Answering the questions
+
+# Data
+
+```{r}
+# reading the data and converting categorical features to factor
+exp_imp <- read_csv("data/data_comexstat.csv") %>% mutate_if(is.character, as_factor)
+
+skim(exp_imp)
+```
+
+Note that the data have no missing values and are composed of 5 variables of type factor, 2 numerics and one being date. There are 117,965 observations that cover the period from 1997 to 2019.
+
+## Dictionary of Data
+
+- date: date where occurred the transaction.
+- product: commodities (soybean, soybeans meal, soybean oil, wheat and sugar).
+- state: State responsible for the transaction.
+- type: if there is exportation or importation.
+- route: route used to transport the commodity.
+- tons: quantity export/import.
+- usd: commercial currency.
+
+For each question, the answer will contain an chunk of code and an explanation.
+
+**1 - Show the evolution of total monthly and total annual exports from Brazil (all states and to everywhere) of ‘soybeans’, ‘soybean oil’ and ‘soybean meal’;**
+
+```{r}
+# adding two columns: year and month
+exp_imp_year_month_tbl <- exp_imp %>% 
+  mutate(year = year(date),
+         month = month(date, abbr = FALSE, label = TRUE))
+
+# total of tons of the specific commodities.
+expt_states_grouped_year_total_tbl <- exp_imp_year_month_tbl %>%
+  filter(type == "Export") %>% 
+  filter(product %in% c("soybeans", "soybean_oil", "soybean_meal")) %>% 
+  group_by(year) %>% 
+  summarise(total_tons = sum(tons)) %>% 
+  ungroup()
+
+# total of tons for each month of the year (the same commodities)
+exp_imp_year_month_total_tbl <- exp_imp_year_month_tbl %>% 
+  filter(type == "Export") %>% 
+  filter(product %in% c("soybeans", "soybean_oil", "soybean_meal")) %>% 
+  group_by(year, month) %>% 
+  summarise(total_tons = sum(tons)) %>% 
+  ungroup()
+
+# Visualizations ORDENARRRRRRR
+exp_imp_year_month_total_tbl %>% 
+  mutate(month = month %>% str_to_title() %>% as_factor()) %>% 
+  ggplot(aes(x = year,
+             y = total_tons)) +
+  geom_point(size = .8) +
+  geom_line() +
+  facet_wrap(~month) +
+  theme_tq() +
+  scale_y_continuous(labels = scales::number_format(scale = 1e-6, suffix = "M")) +
+  labs(
+    title = "Total of Tons for the Monthly Exportations Between 1995 and 2020",
+    subtitle = "Considering all Brazilian States, and Soybean, Soybeans Meal and Soybean Oil Commodities",
+    x = "",
+    y = "Millions of Tons",
+    caption = "github.com/LucianoBatista"
+  )
+
+expt_states_grouped_year_total_tbl %>% 
+  ggplot(aes(x = year,
+             y = total_tons)) +
+  geom_point() +
+  geom_line() +
+  theme_tq() +
+  scale_y_continuous(labels = scales::number_format(scale = 1e-6, suffix = "M")) +
+  labs(
+    title = "Total of Tons for the Annual Exportations Between 1995 and 2020",
+    subtitle = "Considering all Brazilian States, and Soybean, Soybeans Meal and Soybean Oil Commodities",
+    x = "",
+    y = "Millions of Tons",
+    caption = "github.com/LucianoBatista"
+  )
+
+```
+
+On the monthly chart, when comparing the same months over the years, we see that there is a more pronounced growth trend in the months from March to July.
+
+See also that, over the years, as Brazil's exports follow a growing trend, even if there is a drop in 2019, it is likely to grow again.
+
+**2 - What are the 3 most important products exported by Brazil in the last 5 years?**
+
+```{r}
+# filtering for specific years and type
+# total of tuns for these groups
+top_3_product_exp_tbl <- exp_imp_year_month_tbl %>% 
+  filter(year %in% c(2019:2015)) %>% 
+  filter(type == "Export") %>% 
+  group_by(product) %>% 
+  summarise(total_tons_exp = sum(tons)) %>% 
+  ungroup() %>% 
+  slice_max(total_tons_exp, n = 3)
+
+top_3_product_exp_tbl %>% 
+  mutate(product_str = case_when(
+    product == "soybeans" ~ "Soybeans",
+    product == "corn" ~ "Corn",
+    TRUE ~ "Sugar"
+  )) %>% 
+  ggplot(aes(x = total_tons_exp,
+             y = fct_reorder(product_str, total_tons_exp),
+             fill = product_str)) +
+  geom_col() +
+  scale_fill_manual(values = c("#7EBEF7", "#2595F5", "#BBD7F0")) +
+  scale_x_continuous(labels = scales::number_format(scale = 1e-6, suffix = "M")) +
+  guides(fill = FALSE) +
+  theme_tq() +
+  labs(
+    title = "Top 3 - Brazilian Commodities Exports",
+    subtitle = "Considering the Last 5 Years",
+    caption = "github.com/LucianoBatista",
+    x = "Millions of Tons",
+    y = "Commodities"
+  )
+
+glimpse(top_3_product_exp_tbl)
+```
+
+See that the top 3 products that are most exported in Brazil are: Soybeans, Corn and Sugar. With the more important being soybeans.
+
+**3 - What are the main routes through which Brazil have been exporting ‘corn’ in the last few years? Are there differences in the relative importance of routes depending on the product?**
+
+```{r}
+# We see that the sea is the most important route of exportation considering all commodities
+tops_routes_exp <- exp_imp_year_month_tbl %>% 
+  filter(type == "Export") %>% 
+  filter(year > 2000) %>% # selecting most recent years
+  count(route) %>% 
+  mutate(prop = n / sum(n))
+
+# The same happened for Corn
+tops_routes_corn_exp <- exp_imp_year_month_tbl %>% 
+  filter(product == "corn") %>% 
+  filter(type == "Export") %>% 
+  filter(year > 2000) %>% # selecting most recent years
+  count(route) %>% 
+  mutate(prop = n / sum(n))
+
+tops_routes_corn_exp %>% 
+  ggplot(aes(x = prop,
+             y = fct_reorder(route, prop),
+             fill = route)) +
+  geom_col() +
+  scale_x_continuous(labels = scales::percent_format(scale = 100, suffix = "%")) +
+  scale_fill_manual(values = c( "#2595F5", "#7EBEF7", "#BBD7F0", "#BBD7F0", "#BBD7F0")) +
+  theme_tq() +
+  labs(
+    title = "Participation of Each Route in Brazilian Corn Exportation (1995 - 2020)",
+    caption = "github.com/LucianoBatista",
+    x = "Proportions",
+    y = "Exportation Routes"
+  ) +
+  guides(fill = F)
+
+```
+
+
+```{r}
+exp_by_route_product_tbl <- exp_imp_year_month_tbl %>% 
+  mutate(product = case_when(
+    product == "corn" ~ "Corn",
+    product == "soybean_meal" ~ "Soybeans Meal",
+    product == "soybean_oil" ~ "Soybean Oil",
+    product == "sugar" ~ "Sugar",
+    product == "soybeans" ~ "Soybeans",
+    TRUE ~ "Wheat"
+  )) %>% 
+  filter(type == "Export") %>% 
+  group_by(route, product) %>% 
+  summarise(n = n()) %>% 
+  mutate(prop_by_route = n / sum(n)) %>% 
+  ungroup()
+
+exp_by_route_product_tbl %>% 
+  ggplot(aes(x = tidytext::reorder_within(product, prop_by_route, route),
+             y = prop_by_route)) +
+  geom_col(aes(fill = prop_by_route)) +
+  tidytext::scale_x_reordered() +
+  coord_flip() +
+  facet_wrap(~route, scales = "free") +
+  scale_fill_gradient(high = "#144582", low = "#D4E8FF") +
+  scale_y_continuous(labels = scales::percent_format(scale = 100, suffix = "%")) +
+  labs(
+    title = "Proportion of Commodities Exports for All Different Routes",
+    caption = "github.com/LucianoBatista",
+    y = "",
+    x = "Commodities"
+  ) +
+  theme_tq() +
+  labs(fill = "Proportion by Routes")
+
+```
+
+Although most products are transported by sea, we observe that depending on the route there is a preference for the product that will be exported.
+
+As the three main products exported in each route we have:
+- Sea: sugar, soybeans and soybeans meal.
+- Ground: soybean oil, sugar and corn.
+- Air: corn (much more), soybeans and sugar.
+- Other: sugar, soybean oil and corn.
+- River: soybeans, corn and sugar.
+
+**4 - Which countries have been the most important trade partners for Brazil in terms of ‘corn’ and ‘sugar’ in the last 3 years?**
+
+```{r}
+# filtering the data for the previously 3 years
+# also applying the filter for corn and sugar
+# first look on the exportation
+exp_trade_partners_corn_sugar_tbl <- exp_imp %>% 
+  mutate(year = year(date)) %>% 
+  filter(year %in% c(2019, 2018, 2017)) %>% 
+  filter(product %in% c("corn", "sugar") & type == "Export") %>% 
+  # removing special characters 
+  mutate(country2 = country %>% str_replace_all("[[:punct:]]", "") %>% str_trim(side = "both")) %>% 
+  group_by(year, country2) %>% 
+  summarise(total_usd = sum(usd)) %>% 
+  ungroup() %>% 
+  mutate(year_fc = as.factor(year),
+         name = reorder_within(country2, total_usd, year_fc))
+
+exp_trade_partners_corn_sugar_tbl %>% 
+  # threshold to selecting some countries
+  filter(total_usd > 100000000) %>% 
+  ggplot(aes(x = name,
+             y = total_usd,
+             fill = year)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  scale_x_reordered() +
+  scale_y_continuous(labels = scales::dollar_format(scale = 1e-6, suffix = "M")) +
+  facet_wrap(~year, scales = "free") +
+  labs(
+    title = "Trade Partners Evaluation for the last 3 years of Exportation",
+    subtitle = "Considering Corn and Sugar",
+    x = "",
+    y = "Millions of U.S. Dollars",
+    caption = "github.com/LucianoBatista"
+  ) +
+  theme_tq()
+
+```
+
+
+```{r}
+# this is the same code, but filtering by importation
+imp_trade_partners_corn_sugar_tbl <- exp_imp %>% 
+  mutate(year = year(date)) %>% 
+  filter(year %in% c(2019, 2018, 2017)) %>% 
+  filter(product %in% c("corn", "sugar") & type == "Import") %>% 
+  mutate(country2 = country %>% str_replace_all("[[:punct:]]", "") %>% str_trim(side = "both")) %>% 
+  group_by(year, country2) %>% 
+  summarise(total_usd = sum(usd)) %>% 
+  ungroup() %>% 
+  mutate(year_fc = as.factor(year),
+         name = reorder_within(country2, total_usd, year_fc))
+
+
+imp_trade_partners_corn_sugar_tbl %>% 
+  group_by(year) %>% 
+  slice_max(total_usd, n = 3) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = name,
+             y = total_usd,
+             fill = year)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  scale_x_reordered() +
+  scale_y_continuous(labels = scales::dollar_format(scale = 1e-6, suffix = "M")) +
+  facet_wrap(~year, scales = "free") +
+  labs(
+    title = "Trade Partners Evaluation for the last 3 years of Importation",
+    subtitle = "Considering Corn and Sugar",
+    caption = "github.com/LucianoBatista",
+    y = "Millions of U.S. Dollars",
+    x = ""
+  ) +
+  theme_tq()
+```
+
+
+Brazil's main partners alternate between India, Algeria, Iran, Egypt and Bangladesh.
+
+Looking at imports, we see that there are far fewer partners and among them, the main ones are Paraguay, Argentina and the United States.
+
+**5 - For each of the products in the dataset, show the 5 most important states in terms of exports?** 
+
+```{r}
+quest_5_tbl <- exp_imp %>% 
+  filter(type == "Export") %>% 
+  group_by(state, product) %>% 
+  summarise(total_usd = sum(usd)) %>% 
+  ungroup() %>% 
+  group_by(product) %>% 
+  top_n(5)
+
+quest_5_tbl %>% 
+  mutate(product = case_when(
+    product == "corn" ~ "Corn",
+    product == "soybean_meal" ~ "Soybeans Meal",
+    product == "soybean_oil" ~ "Soybean Oil",
+    product == "sugar" ~ "Sugar",
+    product == "soybeans" ~ "Soybeans",
+    TRUE ~ "Wheat"
+  ))  %>% 
+  ggplot(aes(x = total_usd,
+             y = reorder_within(state, total_usd, product),
+             fill = product)) +
+  geom_col() +
+  facet_wrap(~product, scales = "free") +
+    scale_fill_manual(values = c( "#1B8BB5", "#695905", "#1B60B5", "#B55C24", "#B59C12","#69381A" )) +
+  scale_y_reordered() +
+  scale_x_continuous(labels = scales::number_format(scale = 1e-9, suffix = "Bi", prefix = "$")) +
+  guides(fill = F) +
+  theme_tq() +
+  labs(
+    x = "Billions of U.S. Dollars",
+    y = "",
+    title = "Top 5 - Most Important Brazilian States by Commodities",
+    subtitle = "Considering Exportation",
+    caption = "github.com/LucianoBatista"
+  )
+  
+```
+
+**Question:** What should be the total brazilian *soybeans*, *soybean_meal*, and *corn* export forecasts, in tons, for the **next 11 years** (2020-2030)? We’re mostly interested in the **annual forecast**.
+
+For the modeling phase, only the total quantities produced in each month/year for each product of interest will be considered. Then, the data table will be summarized in three variables:
+
+- product
+- date
+- total of tons
+
+Then, 3 new data tables will be created with one time series of each product to make a forecast.
+
+```{r}
+glimpse(exp_imp)
+
+# ts_br_bl contains all the commodities
+ts_br_tbl <- exp_imp %>% 
+  group_by(product, date) %>% 
+  summarise(total_tons = sum(tons)) %>% 
+  ungroup()
+
+ts_br_soybeans_tbl <- ts_br_tbl %>%
+  filter(product == "soybeans")
+
+ts_br_soybeans_meal_tbl <- ts_br_tbl %>%
+  filter(product == "soybean_meal")
+
+ts_br_corn_tbl <- ts_br_tbl  %>%
+  filter(product == "corn")
+
+ts_br_corn_tbl %>% 
+  ggplot(aes(x = date,
+             y = total_tons)) +
+  geom_line() +
+  scale_y_continuous(labels = scales::number_format(scale = 1e-6, suffix = "M")) +
+  theme_tq() +
+  labs(x = "",
+       y = "Total of Tons",
+       title = "Time Series for Corn",
+       caption = "github.com/LucianoBatista")
+
+ts_br_soybeans_tbl %>% 
+  ggplot(aes(x = date,
+             y = total_tons)) +
+  geom_line() +
+  scale_y_continuous(labels = scales::number_format(scale = 1e-6, suffix = "M")) +
+  theme_tq() +
+  labs(x = "",
+       y = "Total of Tons",
+       title = "Time Series for Soybean",
+       caption = "github.com/LucianoBatista")
+
+ts_br_soybeans_meal_tbl %>% 
+  ggplot(aes(x = date,
+             y = total_tons)) +
+  geom_line() +
+  scale_y_continuous(labels = scales::number_format(scale = 1e-6, suffix = "M")) +
+  theme_tq() +
+  labs(x = "",
+       y = "Total of Tons",
+       title = "Time Series for Soybeans Meal",
+       caption = "github.com/LucianoBatista")
+
+```
+
+## Seasonality
+
+Now, with all the data transformed, it is possible to investigate the behavior of each series and then show two types of graphs to detect seasonality.
+
+### Corn
+
+```{r}
+ts_br_corn_tbl %>% 
+  plot_seasonal_diagnostics(date, total_tons, .interactive = F) +
+  scale_y_continuous(labels = scales::number_format(scale = 1e-6, suffix = "M")) +
+  labs(
+    title = "Seasonal Diagnostics for Corn",
+    y = "Millions of Tons",
+    caption = "github.com/LucianoBatista"
+  )
+
+ts_br_corn_tbl %>% 
+  mutate(year = year(date) %>% as_factor(),
+         month = month(date) %>% as_factor()) %>%
+  ggplot(aes(x = year,
+             y = month,
+             fill = total_tons )) +
+  scale_fill_continuous(labels = scales::number_format(scale = 1e-6, suffix = "M")) +
+  geom_tile(color = "grey40") +
+  labs(
+    title = "Totals of Exportation of Corn Across the Years and Months",
+    y = "Months",
+    x = "",
+    fill = "Millions of\nTons",
+    caption = "github.com/LucianoBatista"
+  )
+  
+  
+```
+
+Looking at the seasonal diagnosis, we see that in the last few months there has been an increase in corn exportation. A second analysis is that we see an upward trend in these products over the years, this observation can also be seen when viewing the heat map, where the lighter periods are displayed larger.
+
+### Soybeans
+
+```{r}
+ts_br_soybeans_tbl %>% 
+  plot_seasonal_diagnostics(date, total_tons, .interactive = F) +
+  scale_y_continuous(labels = scales::number_format(scale = 1e-6, suffix = "M")) +
+  labs(
+    title = "Seasonal Diagnostics for Soybeans",
+    y = "Millions of Tons",
+    caption = "github.com/LucianoBatista"
+  )
+
+ts_br_soybeans_tbl %>% 
+  mutate(year = year(date) %>% as_factor(),
+         month = month(date) %>% as_factor()) %>%
+  ggplot(aes(x = year,
+             y = month,
+             fill = total_tons)) +
+  scale_fill_continuous(labels = scales::number_format(scale = 1e-6, suffix = "M")) +
+  geom_tile(color = "grey40") +
+  labs(
+    title = "Totals of Exportation of Soybeans Across the Years and Months",
+    y = "Months",
+    x = "",
+    fill = "Millions of\nTons",
+    caption = "github.com/LucianoBatista"
+  )
+```
+
+Soya, on the other hand, presents a seasonality of exports between March and July. It also has an increasing tendency to increase over the years. When looking at the heatmap, it is possible to see both periods of greater export and an increase over the years.
+
+### Soybeans Meal
+
+```{r}
+ts_br_soybeans_meal_tbl %>% 
+  plot_seasonal_diagnostics(date, total_tons, .interactive = F) +
+  scale_y_continuous(labels = scales::number_format(scale = 1e-6, suffix = "M")) +
+  labs(
+    title = "Seasonal Diagnostics for Soybeans Meal",
+    y = "Millions of Tons",
+    caption = "github.com/LucianoBatista"
+  )
+
+ts_br_soybeans_meal_tbl %>% 
+  mutate(year = year(date) %>% as_factor(),
+         month = month(date) %>% as_factor()) %>%
+  ggplot(aes(x = year,
+             y = month,
+             fill = total_tons)) +
+  scale_fill_continuous(labels = scales::number_format(scale = 1e-6, suffix = "M")) +
+  geom_tile(color = "grey40") +
+  labs(
+    title = "Totals of Exportation of Soybeans Meal Across the Years and Months",
+    y = "Months",
+    x = "",
+    fill = "Millions of\nTons",
+    caption = "github.com/LucianoBatista"
+  )
+```
+
+The data for the soybean meal show a more stationary trend, with not much exported evolution, neither over the months nor over the years.
+
+# Forecasting
+
+As before, our series have different formats, so, we will use a diversity of models, and right after investigating which model had the best result.
+
+Will be applied:
+- auto-arima
+- prophet
+- random forest
+- prophet boost
+
+## Corn production for the next 11 years
+
+```{r}
+# seeing the trend
+ts_br_corn_tbl %>% 
+  plot_time_series(date, total_tons, .interactive = FALSE) +
+  scale_y_continuous(labels = scales::number_format(scale = 1e-6, suffix = "M")) +
+  labs(
+    title = "Time Series Trend for Corn",
+    y = "Millions of Tons",
+    caption = "github.com/LucianoBatista"
+  )
+
+# train/test
+# assess it's the parameter for quantity of test months
+# cumulative TRUE assume that the rest of the data goes to train
+splits <- ts_br_corn_tbl %>% 
+  time_series_split(assess = "48 months", cumulative = TRUE)
+
+# setting seed for reproducibility
+set.seed(123)
+
+# visualizing train and test
+splits %>%
+  tk_time_series_cv_plan() %>% 
+  plot_time_series_cv_plan(date, total_tons, .interactive = T)
+  
+# MODELS ----
+## auto arima
+model_fit_arima <- arima_reg() %>% 
+  set_engine("auto_arima") %>% 
+  fit(total_tons ~ date, training(splits))
+
+## prophet
+model_fit_prophet <- prophet_reg() %>% 
+  set_engine("prophet", yearly.seasonality = TRUE) %>% # yearly seasonality (heatmap)
+  fit(total_tons ~ date, training(splits))
+
+```
+
+
+To use more complex models, we need to pre-process the data. To do this, we are using the recipe package and applying the following steps:
+- step_timeseries_signature: doing 25 more features descending of the date feature.
+- step_rm: remove features.
+- step_fourier: decompose the temporal signal into frequency.
+- step_dummy: conversion of categorical to numeric features.
+
+```{r}
+# recipe for preprocessing
+recipe_spec <- recipe(total_tons ~ date, training(splits)) %>% 
+  step_timeseries_signature(date) %>% 
+  step_rm(contains("am.pm"), contains("hour"), contains("minute"),
+          contains("second"), contains("xts"), contains("day"), contains("week")) %>% 
+  step_fourier(date, period = 365, K = 5) %>% # tune K
+  step_dummy(all_nominal())
+
+recipe_spec %>% prep() %>% juice()
+
+# random forest
+model_spec_rf <- rand_forest(trees = 500, min_n = 50) %>% 
+  set_engine("randomForest")
+
+# pulling all together: model + preprocessing and workflow
+workflow_fit_rf <- workflow() %>% 
+  add_model(model_spec_rf) %>% 
+  add_recipe(recipe_spec %>% step_rm(date)) %>% 
+  fit(training(splits))
+
+# prophet boost
+model_spec_prophet_boost <- prophet_boost() %>% 
+  set_engine("prophet_xgboost", yearly.seasonality = TRUE)
+
+workflow_fit_prophet_boost <- workflow() %>%
+  add_model(model_spec_prophet_boost) %>%
+  add_recipe(recipe_spec) %>%
+  fit(training(splits))
+
+```
+
+Now that our models are trained, we will evaluate their performance on the test data, using the ModelTime package for that.
+
+```{r}
+model_table <- modeltime_table(
+  model_fit_arima,
+  model_fit_prophet,
+  workflow_fit_rf,
+  workflow_fit_prophet_boost
+)
+
+# calibration
+# model error
+calibration_table <- model_table %>%
+  modeltime_calibrate(testing(splits))
+
+calibration_table
+
+calibration_table %>%
+  modeltime_forecast(actual_data = ts_br_corn_tbl) %>%
+  plot_modeltime_forecast(.interactive = FALSE)
+
+calibration_table %>%
+  modeltime_accuracy() %>%
+  table_modeltime_accuracy(.interactive = FALSE)
+
+```
+
+The metric SMAPE (symmetric mean absolute proportional error) will be evaluated, as it is a common metric used in some forecasting works.
+
+Therefore, the ARIMA model performed better.
+
+```{r}
+predictions <- calibration_table %>%
+  # Remove models with low accuracy
+  filter(!.model_id %in% c(4, 3)) %>%
+  # Refit and Forecast Forward
+  modeltime_refit(ts_br_corn_tbl) %>%
+  modeltime_forecast(h = "132 months", actual_data = ts_br_corn_tbl)
+
+predictions %>% 
+  plot_modeltime_forecast(.interactive = TRUE)
+```
+
+
+```{r}
+predict_by_year_model_corn <- predictions %>% 
+  mutate(year = year(.index)) %>% 
+  drop_na(.model_id) %>% 
+  group_by(year, .model_id) %>% 
+  summarise(total_predict = sum(.value))
+
+predict_by_year_model_corn %>% 
+  mutate(model_id = .model_id %>% as_factor()) %>% 
+  mutate(model_id = case_when(
+    .model_id == 1 ~ "Arima",
+    .model_id == 2 ~ "Prophet"
+  )) %>% 
+  ggplot(aes(x = model_id,
+             y = total_predict,
+             fill = model_id)) +
+  geom_col() +
+  scale_fill_manual(values = c("#4975D6", "deepskyblue4", "#21418A")) +
+  scale_y_continuous(labels = scales::number_format(scale = 1e-6, suffix = "M")) +
+  facet_wrap(~year) +
+  theme_tq() +
+  labs(
+    title = "Best Models Predictions of Corn Production for the Next 11 Years",
+    subtitle = "Considering Data from Last 15 Years",
+    x = "",
+    y = "Total of Tons",
+    fill = "Principal Models"
+  )
+  
+
+```
+
+
+## Soybean production for the next 11 years
+
+```{r}
+# seeing the trend
+ts_br_soybeans_tbl %>% 
+  plot_time_series(date, total_tons, .interactive = FALSE) +
+  scale_y_continuous(labels = scales::number_format(scale = 1e-6, suffix = "M")) +
+  labs(
+    title = "Time Series Trend for Soybeans",
+    y = "Millions of Tons",
+    caption = "github.com/LucianoBatista"
+  )
+
+# train/test
+# assess it's the parameter for quantity of test months
+# cumulative TRUE assume that the rest of the data goes to train
+splits <- ts_br_soybeans_tbl %>% 
+  time_series_split(assess = "48 months", cumulative = TRUE)
+
+# visualizing train and test
+splits %>%
+  tk_time_series_cv_plan() %>% 
+  plot_time_series_cv_plan(date, total_tons, .interactive = T)
+
+# setting seed for reproducibility
+set.seed(123)
+
+# MODELS ----
+## auto arima
+model_fit_arima <- arima_reg() %>% 
+  set_engine("auto_arima") %>% 
+  fit(total_tons ~ date, training(splits))
+
+## prophet
+model_fit_prophet <- prophet_reg() %>% 
+  set_engine("prophet", yearly.seasonality = TRUE) %>% # sazonalidade anual (heatmap)
+  fit(total_tons ~ date, training(splits))
+
+```
+
+```{r}
+# recipe for preprocessing
+recipe_spec <- recipe(total_tons ~ date, training(splits)) %>% 
+  step_timeseries_signature(date) %>% 
+  step_rm(contains("am.pm"), contains("hour"), contains("minute"),
+          contains("second"), contains("xts"), contains("day"), contains("week")) %>% 
+  step_fourier(date, period = 365, K = 5) %>% # tune K
+  step_dummy(all_nominal())
+
+recipe_spec %>% prep() %>% juice()
+
+# random forest
+model_spec_rf <- rand_forest(trees = 500, min_n = 50) %>% 
+  set_engine("randomForest")
+
+# pulling all together: model + preprocessing and workflow
+workflow_fit_rf <- workflow() %>% 
+  add_model(model_spec_rf) %>% 
+  add_recipe(recipe_spec %>% step_rm(date)) %>% 
+  fit(training(splits))
+
+# prophet boost
+model_spec_prophet_boost <- prophet_boost() %>% 
+  set_engine("prophet_xgboost", yearly.seasonality = TRUE)
+
+workflow_fit_prophet_boost <- workflow() %>%
+  add_model(model_spec_prophet_boost) %>%
+  add_recipe(recipe_spec) %>%
+  fit(training(splits))
+
+```
+
+
+```{r}
+model_table <- modeltime_table(
+  model_fit_arima,
+  model_fit_prophet,
+  workflow_fit_rf,
+  workflow_fit_prophet_boost
+)
+
+# calibration
+# model error
+calibration_table <- model_table %>%
+  modeltime_calibrate(testing(splits))
+
+calibration_table
+
+calibration_table %>%
+  modeltime_forecast(actual_data = ts_br_soybeans_tbl) %>%
+  plot_modeltime_forecast(.interactive = FALSE)
+
+calibration_table %>%
+  modeltime_accuracy() %>%
+  table_modeltime_accuracy(.interactive = FALSE)
+
+```
+
+The metric SMAPE (symmetric mean absolute proportional error) will be evaluated, as it is a common metric used in some forecasting works.
+
+Therefore, the PROPHET model performed better.
+
+```{r}
+predictions <- calibration_table %>%
+  # removing models with lower accuracy
+  filter(!.model_id %in% c(4, 3)) %>%
+  # Refit and Forecast Forward
+  modeltime_refit(ts_br_soybeans_tbl) %>%
+  modeltime_forecast(h = "132 months", actual_data = ts_br_soybeans_tbl)
+
+predictions %>% 
+  plot_modeltime_forecast(.interactive = TRUE)
+```
+
+
+```{r}
+predict_by_year_model_soybean <- predictions %>% 
+  mutate(year = year(.index)) %>% 
+  drop_na(.model_id) %>% 
+  group_by(year, .model_id) %>% 
+  summarise(total_predict = sum(.value))
+
+predict_by_year_model_soybean %>% 
+  mutate(model_id = .model_id %>% as_factor()) %>% 
+  mutate(model_id = case_when(
+    .model_id == 1 ~ "Arima",
+    .model_id == 2 ~ "Prophet"
+  )) %>% 
+  ggplot(aes(x = model_id,
+             y = total_predict,
+             fill = model_id)) +
+  geom_col() +
+  scale_fill_manual(values = c("#4975D6", "deepskyblue4", "#21418A", "#238391")) +
+  scale_y_continuous(labels = scales::number_format(scale = 1e-6, suffix = "M")) +
+  facet_wrap(~year) +
+  theme_tq() +
+  labs(
+    title = "Best Models Predictions of Soybeans Production for the Next 11 Years",
+    subtitle = "Considering Data from Last 15 Years",
+    x = "",
+    y = "Total of Tons",
+    fill = "Principal Models"
+  )
+
+```
+
+## Soybeans Meal production for the next 11 years
+
+```{r}
+# seeing the trend
+ts_br_soybeans_meal_tbl %>% 
+  plot_time_series(date, total_tons, .interactive = FALSE) +
+  scale_y_continuous(labels = scales::number_format(scale = 1e-6, suffix = "M")) +
+  labs(
+    title = "Time Series Trend for Soybeans",
+    y = "Millions of Tons",
+    caption = "github.com/LucianoBatista"
+  )
+
+# train/test
+# assess it's the parameter for quantity of test months
+# cumulative TRUE assume that the rest of the data goes to train
+splits <- ts_br_soybeans_meal_tbl %>% 
+  time_series_split(assess = "48 months", cumulative = TRUE)
+
+# visualizing train and test
+splits %>%
+  tk_time_series_cv_plan() %>% 
+  plot_time_series_cv_plan(date, total_tons, .interactive = T)
+
+# setting the seed for reproducibility
+set.seed(123)
+
+# MODELS ----
+## auto arima
+model_fit_arima <- arima_reg() %>% 
+  set_engine("auto_arima") %>% 
+  fit(total_tons ~ date, training(splits))
+
+## prophet
+model_fit_prophet <- prophet_reg() %>% 
+  set_engine("prophet", yearly.seasonality = TRUE) %>% # yearly seasonality (heatmap)
+  fit(total_tons ~ date, training(splits))
+
+```
+
+
+```{r}
+# recipe for preprocessing
+recipe_spec <- recipe(total_tons ~ date, training(splits)) %>% 
+  step_timeseries_signature(date) %>% 
+  step_rm(contains("am.pm"), contains("hour"), contains("minute"),
+          contains("second"), contains("xts"), contains("day"), contains("week")) %>% 
+  step_fourier(date, period = 365, K = 5) %>% # tune K
+  step_dummy(all_nominal())
+
+recipe_spec %>% prep() %>% juice()
+
+# random forest
+model_spec_rf <- rand_forest(trees = 500, min_n = 50) %>% 
+  set_engine("randomForest")
+
+# pulling all together: model + preprocessing and workflow
+workflow_fit_rf <- workflow() %>% 
+  add_model(model_spec_rf) %>% 
+  add_recipe(recipe_spec %>% step_rm(date)) %>% 
+  fit(training(splits))
+
+# prophet boost
+model_spec_prophet_boost <- prophet_boost() %>% 
+  set_engine("prophet_xgboost", yearly.seasonality = TRUE)
+
+workflow_fit_prophet_boost <- workflow() %>%
+  add_model(model_spec_prophet_boost) %>%
+  add_recipe(recipe_spec) %>%
+  fit(training(splits))
+
+```
+
+
+```{r}
+model_table <- modeltime_table(
+  model_fit_arima,
+  model_fit_prophet,
+  workflow_fit_rf,
+  workflow_fit_prophet_boost
+)
+
+# calibration
+# model error
+calibration_table <- model_table %>%
+  modeltime_calibrate(testing(splits))
+
+calibration_table
+
+calibration_table %>%
+  modeltime_forecast(actual_data = ts_br_soybeans_meal_tbl) %>%
+  plot_modeltime_forecast(.interactive = FALSE)
+
+calibration_table %>%
+  modeltime_accuracy() %>%
+  table_modeltime_accuracy(.interactive = FALSE)
+
+```
+
+The metric SMAPE (symmetric mean absolute proportional error) will be evaluated, as it is a common metric used in some forecasting works.
+
+Therefore, the Prophet w/ xgboost model performed better.
+
+```{r}
+predictions <- calibration_table %>%
+  # removing models with lower accuracy
+  filter(!.model_id %in% c(1, 3)) %>%
+  # Refit and Forecast Forward
+  modeltime_refit(ts_br_soybeans_meal_tbl) %>%
+  modeltime_forecast(h = "132 months", actual_data = ts_br_soybeans_meal_tbl)
+
+predictions %>% 
+  plot_modeltime_forecast(.interactive = TRUE)
+```
+
+
+```{r}
+predict_by_year_model_soybeans_meal <- predictions %>% 
+  mutate(year = year(.index)) %>% 
+  drop_na(.model_id) %>% 
+  group_by(year, .model_id) %>% 
+  summarise(total_predict = sum(.value))
+
+predict_by_year_model_soybeans_meal %>% 
+  mutate(model_id = .model_id %>% as_factor()) %>% 
+  mutate(model_id = case_when(
+    .model_id == 2 ~ "Prophet",
+    .model_id == 4 ~ "Prophet\nw/ Xgboost"
+  )) %>% 
+  ggplot(aes(x = model_id,
+             y = total_predict,
+             fill = model_id)) +
+  geom_col() +
+  scale_fill_manual(values = c("#4975D6", "deepskyblue4", "#21418A", "#238391")) +
+  scale_y_continuous(labels = scales::number_format(scale = 1e-6, suffix = "M")) +
+  facet_wrap(~year) +
+  theme_tq() +
+  labs(
+    title = "Best Models Predictions of Soybeans Meal Production for the Next 11 Years",
+    subtitle = "Considering Data from Last 15 Years",
+    x = "",
+    y = "Total of Tons",
+    fill = "Principal Models"
+  )
+
+```
+
+So, the objects `predict_by_year_model_soybeans_meal` `predict_by_year_model_soybean` `predict_by_year_model_corn` contains all the predictions. For one next phase, these models could be tuning and other pre-processing steps could be applied. Also is interesting that across the next years these models could be retrained to better improve the forecasting.
+
+# System info
+
+```{r}
+Sys.info()
+```
+
